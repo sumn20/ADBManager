@@ -1,0 +1,19 @@
+# Xcode / SwiftPM 构建产物
+.build/
+.swiftpm/
+Package.resolved
+
+# 一键打包产物（bash build.sh 生成）
+ADBManager.app/
+
+# 图标中间产物（由 gen_icon.py + iconutil 重新生成，无需纳入版本库）
+ADBManager.iconset/
+
+# 本地 AI 维护记忆（仅开发机本地使用，不对外发布）
+CODEBUDDY.md
+
+# macOS 系统文件
+.DS_Store
+
+# 运行期日志（心跳日志落在 ~/Library，本目录下的 .log 一并忽略）
+*.log
