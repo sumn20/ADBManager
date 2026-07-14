@@ -105,6 +105,18 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// 用户操作 adb 命令后的失败钩子：任何 timeout / 非零退出都触发 `monitor.pokeNow()`，
+    /// 让心跳立刻探测一轮。因为稳态 AIMD 把探测间隔放宽到 30s，这能保证「用户在用时秒级响应」。
+    ///
+    /// 例：稳态心跳挂起在第 25s，此刻用户跑命令失败（超时/非零），下一轮探测本要等到 30s；
+    /// 调用后立即打断挂起、下一轮探测秒级触发——用户体感"命令一失败工具就发现了"。
+    /// 忽略成功结果避免无谓抢占心跳节奏（成功不意味 adb server 有异常）。
+    private func pokeMonitorIfFailed(_ r: AdbResult) {
+        if r.timedOut || !r.success {
+            monitor.pokeNow()
+        }
+    }
+
     /// 加载 adb 版本号
     public func loadVersion() async {
         let r = await runner.run(["version"], timeout: 8)
@@ -112,6 +124,7 @@ public final class AppModel: ObservableObject {
             adbVersion = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
             adbVersion = "获取失败"
+            pokeMonitorIfFailed(r)
         }
     }
 
@@ -127,6 +140,7 @@ public final class AppModel: ObservableObject {
             statusMessage = "已刷新设备列表（\(devices.count) 台）"
         } else {
             statusMessage = "刷新失败：\(r.stderr)"
+            pokeMonitorIfFailed(r)
         }
     }
 
@@ -151,6 +165,8 @@ public final class AppModel: ObservableObject {
         append(r.stderr)
         if r.success {
             settings.addTcp(a)
+        } else {
+            pokeMonitorIfFailed(r)
         }
         await refreshDevices()
     }
@@ -163,6 +179,7 @@ public final class AppModel: ObservableObject {
         let r = await runner.run(args, timeout: 8)
         append(r.stdout)
         append(r.stderr)
+        pokeMonitorIfFailed(r)
         await refreshDevices()
     }
 
@@ -180,6 +197,7 @@ public final class AppModel: ObservableObject {
                 append("截图成功，已弹出预览")
             } else {
                 append(r.stderr)
+                pokeMonitorIfFailed(r)
             }
             return
         }
@@ -187,6 +205,7 @@ public final class AppModel: ObservableObject {
         if !r.stderr.isEmpty {
             append(r.stderr)
         }
+        pokeMonitorIfFailed(r)
     }
 
     /// 执行自定义 adb 命令（参数为空格分隔的原始字符串）
@@ -203,6 +222,7 @@ public final class AppModel: ObservableObject {
         if !r.stderr.isEmpty {
             append(r.stderr)
         }
+        pokeMonitorIfFailed(r)
     }
 
     /// 终端输出最大保留字符数（约 1 MB UTF-8）。超出时保留末尾 90%，避免 logcat / getprop
@@ -243,6 +263,7 @@ public final class AppModel: ObservableObject {
             append(r.stderr)
         }
         packageList = PackageParser.parse(r.stdout)
+        pokeMonitorIfFailed(r)
     }
 
     /// 下载指定包的 liteav 日志到本机 `~/Downloads/ADBManager` 目录
@@ -271,9 +292,11 @@ public final class AppModel: ObservableObject {
         case .noLogDirectory:
             downloadStatus = "未找到日志目录"
             cleanupEmptyDownloadDir(dest)
+            // 目录不存在通常是包侧问题（无 TRTC 日志），不代表 adb 挂——不 poke
         case .permissionDenied:
             downloadStatus = "权限不足，无法读取日志目录"
             cleanupEmptyDownloadDir(dest)
+            // 同上：权限是设备侧策略问题，不 poke
         case .none:
             let n = DownloadsTarget.countFiles(in: dest)
             lastDownloadPath = dest.path
@@ -281,6 +304,8 @@ public final class AppModel: ObservableObject {
         case .generic(let message):
             downloadStatus = "下载失败：\(message)"
             cleanupEmptyDownloadDir(dest)
+            // 未分类失败：可能是 adb 侧异常，poke 一下让心跳复核
+            pokeMonitorIfFailed(r)
         }
     }
 
@@ -316,6 +341,7 @@ public final class AppModel: ObservableObject {
         if let parsed = currentActivity, parsed == .none {
             append("未检测到前台 Activity")
         }
+        pokeMonitorIfFailed(r)
     }
 
     /// 生成应用自身状态诊断报告（供「应用状态」dialog 展示 / 复制）。

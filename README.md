@@ -6,6 +6,7 @@
 ## 功能
 
 - **后台心跳 + 无条件自动重启**：后台定时探测（`adb devices -l`），发现 adb 无响应 / 挂掉时自动重启（`kill-server` → 探测 → 必要时 `pkill` → `start-server`），并自动重连之前通过 TCP 连过的设备。无开关、始终开启，是工具的立身之本。
+  - **AIMD 自适应稳态间隔**：稳态每次成功后间隔 +base 缓慢放宽（封顶 30s），adb 稳定时探测频率降到约 1/3；失败立刻回 base 收紧灵敏度；用户操作 adb 命令失败会自动 poke 心跳立刻复核，稳态延迟只发生在完全空闲期。
 - **TCP 设备自动重连**：保存的 TCP 地址（`savedTcp`）在每次重启后并发重连（最坏 8s，而非逐台串行）。
 - **TRTC 日志下载**：选中设备 → 搜索 / 勾选第三方应用包名 → 一键拉取 `/sdcard/Android/data/<pkg>/files/log/liteav/` 到本地 `~/Downloads/ADBManager/<pkg>_liteav_<时间戳>`。
 - **当前 Activity 查看**：常用命令面板内「获取当前 Activity」，解析 `adb shell dumpsys window` 的 `mCurrentFocus`，展示 `包名/Activity`。

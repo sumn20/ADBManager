@@ -20,6 +20,22 @@ public enum MonitorDecision {
     public static func nextBackoff(_ previous: TimeInterval, base: TimeInterval, cap: TimeInterval) -> TimeInterval {
         return min(cap, max(base, previous * 2))
     }
+
+    /// AIMD 加法递增（Additive Increase）：稳态连续成功时把心跳间隔缓慢放宽。
+    /// - previous: 上一轮的间隔（秒）
+    /// - base: 基础间隔 = 增长步长（秒），也是首次成功后的起点
+    /// - cap: 稳态上限（秒），封顶后不再增长
+    ///
+    /// 语义：**连续成功每轮 +base，封顶 cap**。
+    /// - previous ≤ 0 → base（首次成功从 base 起步；等价于 clamp(0+base, base, cap)）
+    /// - previous > 0 → min(cap, max(base, previous + base))
+    ///
+    /// 目的：adb 稳定时降低探测频率（减少 CPU / 子进程），崩溃时通过 MD（乘法递减：立刻回 base）
+    /// 快速发现；用户主动操作可通过 `Monitor.pokeNow()` 立即打破当前挂起、开启下一轮探测——
+    /// 因此稳态延迟只发生在"完全没人用 adb"的空窗期，用户操作时无感。
+    public static func nextIdle(_ previous: TimeInterval, base: TimeInterval, cap: TimeInterval) -> TimeInterval {
+        return min(cap, max(base, previous + base))
+    }
 }
 
 /// 心跳阶段：驱动 UI 的状态指示（颜色 / 文案）与去抖判定的唯一真相源。
@@ -64,7 +80,8 @@ public final class Monitor: ObservableObject {
     /// 状态文案（派生自 phase.label，保留以兼容既有 UI / 测试）
     @Published public private(set) var lastStatus: String = "检测中…"
     @Published public private(set) var lastDevices: [Device] = []
-    /// 当前心跳间隔（秒）：成功后重置为基础值，连续失败则指数退避放大。
+    /// 当前心跳间隔（秒）：稳态 AIMD 加法递增到 `idleCap` 封顶（每次成功 +base）；
+    /// 失败立刻回 base（MD 乘法递减）；重启后仍失败走指数退避到 `backoffCap` 封顶。
     @Published public private(set) var currentInterval: TimeInterval = 0
     /// 连续重启次数（每次成功清零）。用于 UI 显示「重启中… (第 N 次)」，
     /// 也让相同 phase 但计数不同的更新能被 @Published 感知（否则 setPhase 去抖会吃掉）。
@@ -87,8 +104,12 @@ public final class Monitor: ObservableObject {
     private static let serverCmdTimeout: TimeInterval = 3
     /// TCP connect 超时（秒）：并发执行，每台设备各自 8s 上限
     private static let connectTimeout: TimeInterval = 8
-    /// 退避上限（秒）
+    /// 退避上限（秒，失败重启仍失败时）
     private static let backoffCap: TimeInterval = 120
+    /// 稳态上限（秒，AIMD 成功递增）：稳态最长每 30s 探测一次，
+    /// 平衡「崩溃发现速度」与「CPU / adb 子进程占用」。
+    /// 用户操作 adb 命令失败时会通过 `pokeNow()` 立即打断当前挂起，因此稳态延迟只发生在完全空闲期。
+    private static let idleCap: TimeInterval = 30
 
     /// 追加一条带时间戳的诊断日志，并做环形截断（一次赋值，最多触发一次 @Published 发布）。
     /// 同时**镜像写入本地文件**（`MonitorLogger`），供崩溃后回看与工程师排查。
@@ -189,11 +210,14 @@ public final class Monitor: ObservableObject {
     ///
     /// 流程：
     /// 1. 探测 `adb devices -l`（3s 超时，快速失败）
-    /// 2. 可用 → 重置间隔为基础值，去抖发布"可用"
-    /// 3. 不可用 → 分级降级重启：kill-server → 重探；仍失败才 pkill → start-server → 并发重连 TCP
-    ///    - 重试可用 → 重置间隔，发布"可用"
-    ///    - 重试仍不可用 → 间隔指数退避（封顶），发布"不可用"
+    /// 2. 可用 → **AIMD 加法递增**：`interval = min(idleCap, previous+base)`，稳态每次成功缓慢放宽到 30s 封顶
+    /// 3. 不可用 → **立刻 MD 回 base**，走分级降级重启：kill-server → 重探；仍失败才 pkill → start-server → 并发重连 TCP
+    ///    - 重试可用 → 重置为 base（下一轮成功再 AIMD 递增）
+    ///    - 重试仍不可用 → 间隔指数退避（封顶 120s），发布"不可用"
     /// 4. `sleepFor` 挂起当前轮间隔——挂起期间零 CPU，可被 `stop()` / `pokeNow()` 中断
+    ///
+    /// AIMD 目的：稳态时降低探测频率（减少 CPU / 子进程），崩溃时通过 MD 快速恢复灵敏度；
+    /// 用户操作 adb 命令失败也会 `pokeNow()` 打断挂起，所以"稳态最坏 30s 发现"只发生在完全空闲期。
     func tick() async {
         let base = max(1, TimeInterval(settings.interval))
 
@@ -204,26 +228,28 @@ public final class Monitor: ObservableObject {
 
         if Task.isCancelled { return }  // stop() 后立刻短路，避免副作用
 
-        // 心跳成功：直接可用，重置退避与重启计数
+        // 心跳成功：AIMD 加法递增稳态间隔（稳态省探测），重置重启计数
         if !MonitorDecision.shouldRestart(result: result) {
             let devs = Device.parse(result.stdout)
             let (added, removed) = deviceDiff(old: lastDevices, new: devs)
+            let nextIdle = MonitorDecision.nextIdle(currentInterval, base: base, cap: Monitor.idleCap)
             if added.isEmpty && removed.isEmpty {
-                diag(.info, "探测成功｜耗时=\(probeElapsed)｜设备=\(devs.count) 台")
+                diag(.info, "探测成功｜耗时=\(probeElapsed)｜设备=\(devs.count) 台｜下一轮=\(Int(nextIdle))s")
             } else {
                 var changes: [String] = []
                 if !added.isEmpty   { changes.append("新增[\(added.joined(separator: ","))]") }
                 if !removed.isEmpty { changes.append("断开[\(removed.joined(separator: ","))]") }
-                diag(.info, "探测成功｜耗时=\(probeElapsed)｜设备=\(devs.count) 台｜变化：\(changes.joined(separator: " "))")
+                diag(.info, "探测成功｜耗时=\(probeElapsed)｜设备=\(devs.count) 台｜变化：\(changes.joined(separator: " "))｜下一轮=\(Int(nextIdle))s")
             }
             setPhase(.available, devices: devs)
             resetRestartAttempts()
-            setInterval(base)
-            await sleepFor(base)
+            setInterval(nextIdle)
+            await sleepFor(nextIdle)
             return
         }
 
-        // 心跳失败：先把 UI 切到「重启中」，让异常即时可见
+        // 心跳失败：MD 立刻收紧回 base（丢弃已积攒的稳态放宽），先把 UI 切到「重启中」让异常即时可见
+        setInterval(base)
         let reason: String
         if result.timedOut {
             reason = "探测超时(>\(Int(Monitor.probeTimeout))s)"
@@ -250,7 +276,8 @@ public final class Monitor: ObservableObject {
             diag(.info, "重启成功｜重启耗时=\(elapsedMs(restartStart))｜重试探测耗时=\(retryElapsed)｜设备=\(devs.count) 台")
             setPhase(.available, devices: devs)
             resetRestartAttempts()
-            setInterval(base)
+            // 刚恢复保持 base（上面 setInterval(base) 已收紧），下一轮成功再 AIMD 递增。
+            // 目的：adb 常有"假恢复"，前几轮先密探确认稳定，再逐步放宽。
         } else {
             let retryReason: String
             if retry.timedOut {

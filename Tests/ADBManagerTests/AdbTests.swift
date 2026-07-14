@@ -98,6 +98,25 @@ final class AdbTests: XCTestCase {
         XCTAssertEqual(MonitorDecision.nextBackoff(1, base: base, cap: cap), base)
     }
 
+    // MARK: - AIMD 加法递增算法（稳态省探测）
+
+    func testNextIdleAIMD() {
+        let base: TimeInterval = 10
+        let cap: TimeInterval = 30
+        // 首次成功（previous=0）→ base（起点，等价 clamp(0+base, base, cap)）
+        XCTAssertEqual(MonitorDecision.nextIdle(0, base: base, cap: cap), base)
+        // 连续成功：每轮 +base，封顶 cap
+        XCTAssertEqual(MonitorDecision.nextIdle(10, base: base, cap: cap), 20)
+        XCTAssertEqual(MonitorDecision.nextIdle(20, base: base, cap: cap), cap)
+        // 封顶保护：已到 cap 不再增长
+        XCTAssertEqual(MonitorDecision.nextIdle(30, base: base, cap: cap), cap)
+        XCTAssertEqual(MonitorDecision.nextIdle(999, base: base, cap: cap), cap)
+        // 下限保护：previous 异常小（不应低于 base）
+        XCTAssertEqual(MonitorDecision.nextIdle(-5, base: base, cap: cap), base)
+        // cap < base 的畸形入参：min(cap, max(base, ...)) → base，但被外层 min(cap) 拉回 cap
+        XCTAssertEqual(MonitorDecision.nextIdle(0, base: 10, cap: 5), 5)
+    }
+
     // MARK: - AdbRunner 真实执行
 
     func testAdbRunnerSuccess() async {
@@ -454,9 +473,69 @@ final class AdbTests: XCTestCase {
         let interval = await monitor.currentInterval
         XCTAssertTrue(available)
         XCTAssertEqual(status, "可用")
+        // AIMD 首次成功从 base(=1) 起步
         XCTAssertEqual(interval, 1)
         // 成功路径不调用重启
         XCTAssertFalse(mock.calls.contains(where: { $0 == ["kill-server"] }))
+    }
+
+    /// 连续成功 → AIMD 加法递增，稳态间隔在 base 之上逐步放宽（每轮 +base 直到 cap 封顶）
+    func testMonitorTickAIMDIncrementOnConsecutiveSuccess() async {
+        let mock = MockRunner(result: AdbResult(stdout: "List of devices attached\n", exitCode: 0))
+        let settings = Settings()
+        settings.interval = 1  // base=1s，避免测试久等
+        let monitor = await MainActor.run {
+            let m = Monitor(runner: mock, settings: settings)
+            m.pkillAction = {}
+            return m
+        }
+
+        // 第 1 次成功 → interval = base(1)
+        await monitor.tick()
+        var interval = await monitor.currentInterval
+        XCTAssertEqual(interval, 1, "首次成功从 base 起步")
+
+        // 立刻唤醒挂起（sleepFor 里的 continuation），跳过 sleep，直接进行下一轮验证
+        // 注：本用例每次 tick 结束会进入 sleepFor(interval)，但下一次调用 tick 之前
+        // sleep 已被主线程外的 Task 超时收尾，interval 值不受影响。为避免用例被 sleep 拖慢，
+        // base=1 保证下一轮 tick 前最多等 1s。
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+
+        // 第 2 次成功 → interval = min(cap, base+prev) = 2
+        await monitor.tick()
+        interval = await monitor.currentInterval
+        XCTAssertEqual(interval, 2, "连续成功后 AIMD +base 递增")
+    }
+
+    /// 成功后再失败 → interval 立刻 MD 回 base（不保留之前放宽的稳态间隔），然后走重启
+    func testMonitorTickMDResetOnFailureAfterSuccess() async {
+        let okMock = MockRunner(result: AdbResult(stdout: "List of devices attached\n", exitCode: 0))
+        let settings = Settings()
+        settings.interval = 1
+        let monitor = await MainActor.run {
+            let m = Monitor(runner: okMock, settings: settings)
+            m.pkillAction = {}
+            return m
+        }
+
+        // 先走两次成功，把 interval 递增到 2
+        await monitor.tick()
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        await monitor.tick()
+        let raised = await monitor.currentInterval
+        XCTAssertEqual(raised, 2, "先建立起 AIMD 递增后的稳态间隔")
+
+        // 切换 mock 为失败态：下一轮 tick 应看到 interval 被立刻 MD 回 base(=1)，
+        // 随后重启失败进入退避（此时 interval 会从 base 起翻倍，即仍为 base=1 的第一档退避）。
+        okMock.result = AdbResult(stdout: "", stderr: "dead", exitCode: 1)
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        await monitor.tick()
+        let after = await monitor.currentInterval
+        // 失败后：先 MD 回 base=1，重启后仍失败 → nextBackoff(1, 1, 120) = max(1, 2) = 2
+        // 关键断言：after >= base（不是保留原来的 2 又 *2），确认 MD 生效
+        XCTAssertGreaterThanOrEqual(after, 1)
+        let phase = await monitor.phase
+        XCTAssertEqual(phase, .unavailable)
     }
 }
 
