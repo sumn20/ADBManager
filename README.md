@@ -34,6 +34,25 @@ bash build.sh
 
 `build.sh` 会在当前目录生成 `ADBManager.app`，双击即可启动（菜单栏出现图标）。
 
+### 版本号维护
+
+版本号真相源在仓库根的 **`VERSION`** 文件（如 `1.0.0`）。发版流程：
+
+```bash
+# 1. 修改 VERSION 文件为新版本
+echo "1.1.0" > VERSION
+
+# 2. 重新打包（build.sh 会把 VERSION + git 短哈希写进 Info.plist）
+bash build.sh
+
+# 3. 提交并打 tag
+git commit -am "release: 1.1.0"
+git tag v1.1.0
+git push && git push --tags
+```
+
+打包出的 app 里 `CFBundleShortVersionString` = 用户可见版本（如 `1.1.0`），`CFBundleVersion` = `<版本>-<git 短哈希>`（如 `1.1.0-a1b2c3d`）。诊断 dialog 顶部会显示 `App 版本：1.1.0 (build 1.1.0-a1b2c3d)`。
+
 > 重新生成应用图标：修改 `gen_icon.py` 后执行 `python3 gen_icon.py`（依赖 Pillow + macOS `iconutil`），再 `bash build.sh`。
 
 ## 使用说明
