@@ -99,17 +99,17 @@ public final class Monitor: ObservableObject {
     }()
 
     /// 探测超时（秒）：`adb devices -l` 正常几十毫秒，3s 足够（过长会让 UI 卡在旧状态）
-    private static let probeTimeout: TimeInterval = 3
+    public static let probeTimeout: TimeInterval = 3
     /// server 生命周期命令超时（秒）：kill/start-server 正常瞬时完成
     private static let serverCmdTimeout: TimeInterval = 3
     /// TCP connect 超时（秒）：并发执行，每台设备各自 8s 上限
     private static let connectTimeout: TimeInterval = 8
     /// 退避上限（秒，失败重启仍失败时）
-    private static let backoffCap: TimeInterval = 120
+    public static let backoffCap: TimeInterval = 120
     /// 稳态上限（秒，AIMD 成功递增）：稳态最长每 30s 探测一次，
     /// 平衡「崩溃发现速度」与「CPU / adb 子进程占用」。
     /// 用户操作 adb 命令失败时会通过 `pokeNow()` 立即打断当前挂起，因此稳态延迟只发生在完全空闲期。
-    private static let idleCap: TimeInterval = 30
+    public static let idleCap: TimeInterval = 30
 
     /// 追加一条带时间戳的诊断日志，并做环形截断（一次赋值，最多触发一次 @Published 发布）。
     /// 同时**镜像写入本地文件**（`MonitorLogger`），供崩溃后回看与工程师排查。

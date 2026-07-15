@@ -364,7 +364,13 @@ public final class AppModel: ObservableObject {
         lines.append("== 心跳 ==")
         lines.append("运行中：\(monitor.running ? "是" : "否")")
         lines.append("adb 可用：\(monitor.isAdbAvailable ? "是" : "否")（\(monitor.lastStatus)）")
-        lines.append("基础间隔：\(settings.interval)s　当前间隔：\(Int(monitor.currentInterval))s")
+        let base = TimeInterval(settings.interval)
+        let cur = monitor.currentInterval
+        lines.append("基础间隔：\(Int(base))s　当前间隔：\(Int(cur))s")
+        lines.append("稳态上限：\(Int(Monitor.idleCap))s　退避上限：\(Int(Monitor.backoffCap))s")
+        // 根据 phase 推断"下一轮探测何时发生 / 为什么"——让 AIMD 递增 / 退避的节奏透明可见
+        lines.append("下一轮探测：\(nextProbeDescription(phase: monitor.phase, currentInterval: cur, base: max(1, base)))")
+        lines.append("累计重启：\(monitor.restartAttempts) 次")
         lines.append("最近检测：\(fmt(monitor.lastCheck))")
         lines.append("最近重启：\(fmt(monitor.lastRestart))")
         lines.append("心跳可见设备：\(monitor.lastDevices.count) 台")
@@ -374,6 +380,32 @@ public final class AppModel: ObservableObject {
         lines.append("当前选中：\(selectedSerial ?? "—")")
         lines.append("已存 TCP：\(settings.savedTcp.isEmpty ? "—" : settings.savedTcp.joined(separator: ", "))")
         return lines.joined(separator: "\n")
+    }
+
+    /// 「下一轮探测」文案：让 AIMD 递增 / MD 收紧 / 指数退避的节奏可见。
+    /// - phase: 当前心跳阶段
+    /// - currentInterval: 当前挂起间隔（秒）
+    /// - base: 基础间隔（秒，非零）
+    /// 返回如 "20s 后 → 30s（AIMD 稳态递增）" / "40s 后（退避中）" / "重启完成后决定" 等。
+    private func nextProbeDescription(phase: HeartbeatPhase, currentInterval: TimeInterval, base: TimeInterval) -> String {
+        switch phase {
+        case .available:
+            // 成功路径：下一轮走 AIMD 递增
+            let next = MonitorDecision.nextIdle(currentInterval, base: base, cap: Monitor.idleCap)
+            let capped = next >= Monitor.idleCap
+            let tag = capped ? "已封顶 idleCap" : "AIMD 稳态递增"
+            return "\(Int(currentInterval))s 后 → 下一轮\(Int(next))s（\(tag)）"
+        case .unavailable:
+            // 失败重启仍失败：下一轮走指数退避
+            let next = MonitorDecision.nextBackoff(currentInterval, base: base, cap: Monitor.backoffCap)
+            let capped = next >= Monitor.backoffCap
+            let tag = capped ? "已封顶 backoffCap" : "指数退避中"
+            return "\(Int(currentInterval))s 后 → 下一轮\(Int(next))s（\(tag)）"
+        case .restarting:
+            return "重启完成后决定（可用→回 base；失败→退避）"
+        case .checking:
+            return "首次探测中"
+        }
     }
 
     /// 在 Finder 中打开指定路径（文件则选中高亮，目录则打开目录）
