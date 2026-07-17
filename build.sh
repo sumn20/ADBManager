@@ -18,6 +18,25 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
+# —— 自动递增 patch 版本 ——
+# 每次 build.sh 执行都把 VERSION 的最后一段 +1（x.y.z → x.y.(z+1)），并写回文件。
+# 语义：patch 号 = 构建号；major/minor 仍手动维护。
+# 跳过自增：设置环境变量 SKIP_VERSION_BUMP=1（用于打 tag 前不希望再动版本号的场景）
+if [ "${SKIP_VERSION_BUMP:-0}" != "1" ]; then
+    if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        MAJOR="${BASH_REMATCH[1]}"
+        MINOR="${BASH_REMATCH[2]}"
+        PATCH="${BASH_REMATCH[3]}"
+        NEW_PATCH=$((PATCH + 1))
+        NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+        echo "$NEW_VERSION" > VERSION
+        echo "==> 版本自增：$VERSION → $NEW_VERSION"
+        VERSION="$NEW_VERSION"
+    else
+        echo "==> 版本号 '$VERSION' 不匹配 x.y.z 格式，跳过自增"
+    fi
+fi
+
 if git rev-parse --short HEAD >/dev/null 2>&1; then
     GIT_SHORT="$(git rev-parse --short HEAD)"
     BUILD_NO="${VERSION}-${GIT_SHORT}"

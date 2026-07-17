@@ -38,6 +38,7 @@ struct ScrcpyCard: View {
             ("性能优先",   { model.launchScrcpy(args: ["-m1024"]) }),
             ("高质量",    { model.launchScrcpy(args: ["--video-codec=h265", "-m1920", "--max-fps=60", "--no-audio", "-K"]) }),
             ("关屏投屏",   { model.launchScrcpy(args: ["--turn-screen-off"]) }),
+            ("仅视频",    { model.launchScrcpy(args: ["--no-audio"]) }),
             ("仅音频",    { model.launchScrcpy(args: ["--no-video"]) }),
             ("手柄模式",   { model.launchScrcpy(args: ["-G"]) }),
         ]
@@ -51,6 +52,12 @@ struct ScrcpyCard: View {
                             row[i].action()
                         }
                         .frame(maxWidth: .infinity)
+                    }
+                    // 最后一行不足 3 列时填充占位，让按钮宽度保持一致
+                    if row.count < 3 {
+                        ForEach(0..<(3 - row.count), id: \.self) { _ in
+                            Color.clear.frame(maxWidth: .infinity)
+                        }
                     }
                 }
             }
