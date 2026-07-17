@@ -235,6 +235,28 @@ public final class AppModel: ObservableObject {
         pokeMonitorIfFailed(r)
     }
 
+    /// 向选中设备发送 `input keyevent <code>`（Home / Back / 音量等）
+    /// - Parameters:
+    ///   - keycode: Android KeyEvent 数字码（如 3=HOME、4=BACK、26=POWER）
+    ///   - label: 日志显示用的可读名称（如 "HOME"）
+    public func sendKeyEvent(_ keycode: Int, label: String) async {
+        guard let serial = selectedSerial, !serial.isEmpty else {
+            append("[按键] 未选中设备，无法发送 \(label)")
+            statusMessage = "请先选中设备"
+            return
+        }
+        // shell input keyevent <code> —— 走 custom 通道，享受统一日志/超时/心跳 poke
+        let args = CommandBuilder.buildArgs(
+            for: .custom(args: ["shell", "input", "keyevent", String(keycode)]),
+            serial: serial
+        )
+        append("> adb \(args.joined(separator: " "))  # \(label)")
+        let r = await runner.run(args, timeout: 5)
+        if !r.stdout.isEmpty { append(r.stdout) }
+        if !r.stderr.isEmpty { append(r.stderr) }
+        pokeMonitorIfFailed(r)
+    }
+
     /// 终端输出最大保留字符数（约 1 MB UTF-8）。超出时保留末尾 90%，避免 logcat / getprop
     /// 等大输出无限累积——对常驻小工具尤其重要（Peak footprint 会被拉高、swap 增加）。
     private static let terminalMaxChars = 1_000_000

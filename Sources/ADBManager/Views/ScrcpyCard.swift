@@ -24,6 +24,8 @@ struct ScrcpyCard: View {
         VStack(alignment: .leading, spacing: 8) {
             commandGrid
             recordSection
+            Divider().padding(.vertical, 2)
+            keyEventSection
             if !model.scrcpyStatus.isEmpty {
                 Text(model.scrcpyStatus)
                     .font(.caption)
@@ -81,6 +83,59 @@ struct ScrcpyCard: View {
             Text("录屏文件保存到 ~/Downloads/ADBManager/")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - 设备按键（通过 adb shell input keyevent 发送，无需 scrcpy 也可用）
+
+    /// Android KeyEvent 常量（见 https://developer.android.com/reference/android/view/KeyEvent）
+    private var keyEventItems: [(title: String, keycode: Int)] {
+        [
+            ("Home",      3),
+            ("返回",      4),
+            ("多任务",    187),
+            ("菜单",      82),
+            ("电源",      26),
+            ("音量+",     24),
+            ("音量-",     25),
+            ("静音",      164),
+        ]
+    }
+
+    private var keyEventSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("设备按键", systemImage: "square.grid.3x2.fill")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("需选中设备；scrcpy 未开也可用")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            let items = keyEventItems
+            let rows = stride(from: 0, to: items.count, by: 4)
+                .map { Array(items[$0..<min($0 + 4, items.count)]) }
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 6) {
+                        ForEach(0..<row.count, id: \.self) { i in
+                            let item = row[i]
+                            Button(item.title) {
+                                Task { await model.sendKeyEvent(item.keycode, label: item.title) }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .disabled(model.selectedSerial == nil)
+                        }
+                        if row.count < 4 {
+                            ForEach(0..<(4 - row.count), id: \.self) { _ in
+                                Color.clear.frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
