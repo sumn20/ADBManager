@@ -429,8 +429,14 @@ public final class AppModel: ObservableObject {
 
     /// 检测 scrcpy 安装状态（同步，只在 init / 手动刷新时调用）
     public func detectScrcpy() {
-        scrcpyPath = ScrcpyRunner.detectPath()
-        isScrcpyAvailable = scrcpyPath != nil
+        let found = ScrcpyRunner.detectPath()
+        scrcpyPath = found
+        isScrcpyAvailable = found != nil
+        if let p = found {
+            append("[scrcpy] 已检测到：\(p)")
+        } else {
+            append("[scrcpy] 未检测到 scrcpy，请先安装（brew install scrcpy 或前往官网）")
+        }
     }
 
     /// 启动 scrcpy（fire-and-forget），自动加 -s serial（如果有选中设备）
@@ -438,15 +444,39 @@ public final class AppModel: ObservableObject {
     public func launchScrcpy(args: [String] = []) {
         guard let path = scrcpyPath else {
             scrcpyStatus = "scrcpy 未安装"
+            append("[scrcpy] 未安装，无法启动")
             return
         }
-        let process = ScrcpyRunner.launch(path: path, args: args, serial: selectedSerial)
-        if process != nil {
-            scrcpyStatus = "已启动 scrcpy"
-            append("> scrcpy \(args.joined(separator: " "))")
+        let currentAdb = adbPath
+        let currentSerial = selectedSerial
+        let result = ScrcpyRunner.launch(
+            path: path,
+            args: args,
+            serial: currentSerial,
+            adbPath: currentAdb,
+            stderrHandler: { [weak self] text in
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                Task { @MainActor [weak self] in
+                    self?.append("[scrcpy] \(trimmed)")
+                }
+            },
+            terminationHandler: { [weak self] code in
+                Task { @MainActor [weak self] in
+                    self?.append("[scrcpy] 进程退出（exit=\(code)）")
+                    if code != 0 {
+                        self?.scrcpyStatus = "scrcpy 已退出（exit=\(code)），请查看输出日志"
+                    }
+                }
+            }
+        )
+        append("[scrcpy] 启动命令：\(result.command)")
+        if let proc = result.process {
+            scrcpyStatus = "已启动 scrcpy（PID \(proc.processIdentifier)）"
+            append("[scrcpy] 已启动，PID=\(proc.processIdentifier)，设备=\(currentSerial ?? "默认")")
         } else {
-            scrcpyStatus = "scrcpy 启动失败"
-            append("scrcpy 启动失败")
+            scrcpyStatus = "scrcpy 启动失败：\(result.launchError ?? "未知错误")"
+            append("[scrcpy] 启动失败：\(result.launchError ?? "未知错误")")
         }
     }
 
@@ -454,10 +484,12 @@ public final class AppModel: ObservableObject {
     public func startScrcpyRecord() {
         guard let path = scrcpyPath else {
             scrcpyStatus = "scrcpy 未安装"
+            append("[scrcpy] 未安装，无法录屏")
             return
         }
         guard scrcpyRecordProcess == nil else {
             scrcpyStatus = "已在录屏中"
+            append("[scrcpy] 已在录屏中，忽略重复启动")
             return
         }
 
@@ -474,25 +506,42 @@ public final class AppModel: ObservableObject {
         let filePath = dir.appendingPathComponent(filename).path
 
         let args = ["--record=\(filePath)"]
-        // 不加 --no-playback，录屏同时投屏（用户能看到画面）
+        let currentAdb = adbPath
+        let currentSerial = selectedSerial
 
-        let process = ScrcpyRunner.launch(path: path, args: args, serial: selectedSerial) { [weak self] proc in
-            // 进程退出回调（任意线程），回主线程清理状态
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.scrcpyRecordProcess === proc {
+        let result = ScrcpyRunner.launch(
+            path: path,
+            args: args,
+            serial: currentSerial,
+            adbPath: currentAdb,
+            stderrHandler: { [weak self] text in
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                Task { @MainActor [weak self] in
+                    self?.append("[scrcpy] \(trimmed)")
+                }
+            },
+            terminationHandler: { [weak self] code in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.append("[scrcpy] 录屏进程退出（exit=\(code)）")
                     self.scrcpyRecordProcess = nil
-                    self.scrcpyStatus = "录屏已结束"
+                    if code == 0 {
+                        self.scrcpyStatus = "录屏已结束：\(filePath)"
+                    } else {
+                        self.scrcpyStatus = "录屏异常退出（exit=\(code)）"
+                    }
                 }
             }
-        }
-        if let process {
-            scrcpyRecordProcess = process
-            scrcpyStatus = "正在录屏：\(filename)"
-            append("> scrcpy --record=\(filePath)")
+        )
+        append("[scrcpy] 录屏命令：\(result.command)")
+        if let proc = result.process {
+            scrcpyRecordProcess = proc
+            scrcpyStatus = "正在录屏（PID \(proc.processIdentifier)）：\(filename)"
+            append("[scrcpy] 录屏已启动，PID=\(proc.processIdentifier)，输出=\(filePath)")
         } else {
-            scrcpyStatus = "scrcpy 录屏启动失败"
-            append("scrcpy 录屏启动失败")
+            scrcpyStatus = "scrcpy 录屏启动失败：\(result.launchError ?? "未知错误")"
+            append("[scrcpy] 录屏启动失败：\(result.launchError ?? "未知错误")")
         }
     }
 
@@ -500,10 +549,12 @@ public final class AppModel: ObservableObject {
     public func stopScrcpyRecord() {
         guard let process = scrcpyRecordProcess else {
             scrcpyStatus = "没有正在进行的录屏"
+            append("[scrcpy] 没有正在进行的录屏")
             return
         }
         process.terminate()
         // terminationHandler 会清理 scrcpyRecordProcess
         scrcpyStatus = "正在停止录屏..."
+        append("[scrcpy] 已发送停止信号（SIGTERM）")
     }
 }
