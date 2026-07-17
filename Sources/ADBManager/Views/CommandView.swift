@@ -13,9 +13,6 @@ struct CommandView: View {
         // 空间分配由 ContentView 控制：TerminalView 用 maxHeight:.infinity 吃掉剩余。
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                // —— TRTC 日志下载（第一位）——
-                TrtcLogCard()
-
                 // —— 常用命令卡片（含获取当前 Activity）——
                 VStack(alignment: .leading, spacing: 10) {
                     Label("常用命令", systemImage: "terminal.fill")
@@ -24,6 +21,12 @@ struct CommandView: View {
                     currentActivitySection
                 }
                 .card()
+
+                // —— scrcpy 投屏 ——
+                ScrcpyCard()
+
+                // —— TRTC 日志下载 ——
+                TrtcLogCard()
 
                 // —— 更多操作 ——
                 VStack(alignment: .leading, spacing: 10) {

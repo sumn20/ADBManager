@@ -26,6 +26,14 @@ public final class AppModel: ObservableObject {
     /// 桥接嵌套 ObservableObject（settings / monitor）变化用的订阅集合
     private var cancellables = Set<AnyCancellable>()
 
+    // —— scrcpy 相关状态 ——
+    @Published public var scrcpyPath: String? = nil
+    @Published public var isScrcpyAvailable: Bool = false
+    /// 当前正在录屏的 scrcpy 进程（用于停止录屏）
+    @Published public var scrcpyRecordProcess: Process? = nil
+    /// scrcpy 状态提示（如启动失败、正在录屏等）
+    @Published public var scrcpyStatus: String = ""
+
     // —— TRTC 日志 / 包管理 / 当前 Activity 相关状态 ——
     @Published public var packageList: [String] = []
     @Published public var selectedPackage: String? = nil
@@ -49,6 +57,8 @@ public final class AppModel: ObservableObject {
         // 依赖窗口/菜单的 onAppear 不可靠——LaunchAgent 后台拉起时窗口未必创建、
         // 菜单栏下拉内容也只在点击展开时才实例化，都会导致心跳永不启动。
         monitor.start()
+        // 检测 scrcpy 安装状态
+        detectScrcpy()
     }
 
     /// 供测试注入依赖
@@ -413,5 +423,87 @@ public final class AppModel: ObservableObject {
     public func revealInFinder(_ path: String?) {
         guard let path else { return }
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+    }
+
+    // MARK: - scrcpy
+
+    /// 检测 scrcpy 安装状态（同步，只在 init / 手动刷新时调用）
+    public func detectScrcpy() {
+        scrcpyPath = ScrcpyRunner.detectPath()
+        isScrcpyAvailable = scrcpyPath != nil
+    }
+
+    /// 启动 scrcpy（fire-and-forget），自动加 -s serial（如果有选中设备）
+    /// - Parameter args: 额外参数（如 `["-m1024"]`、`["--turn-screen-off"]` 等）
+    public func launchScrcpy(args: [String] = []) {
+        guard let path = scrcpyPath else {
+            scrcpyStatus = "scrcpy 未安装"
+            return
+        }
+        let process = ScrcpyRunner.launch(path: path, args: args, serial: selectedSerial)
+        if process != nil {
+            scrcpyStatus = "已启动 scrcpy"
+            append("> scrcpy \(args.joined(separator: " "))")
+        } else {
+            scrcpyStatus = "scrcpy 启动失败"
+            append("scrcpy 启动失败")
+        }
+    }
+
+    /// 开始 scrcpy 录屏（录屏文件落在 ~/Downloads/ADBManager/）
+    public func startScrcpyRecord() {
+        guard let path = scrcpyPath else {
+            scrcpyStatus = "scrcpy 未安装"
+            return
+        }
+        guard scrcpyRecordProcess == nil else {
+            scrcpyStatus = "已在录屏中"
+            return
+        }
+
+        // 确保下载目录存在（复用 DownloadsTarget 的根目录）
+        let downloads = FileManager.default
+            .urls(for: .downloadsDirectory, in: .userDomainMask)
+            .first ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+        let dir = downloads.appendingPathComponent(DownloadsTarget.rootFolderName)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd_HHmmss"
+        let filename = "scrcpy_record_\(df.string(from: Date())).mp4"
+        let filePath = dir.appendingPathComponent(filename).path
+
+        let args = ["--record=\(filePath)"]
+        // 不加 --no-playback，录屏同时投屏（用户能看到画面）
+
+        let process = ScrcpyRunner.launch(path: path, args: args, serial: selectedSerial) { [weak self] proc in
+            // 进程退出回调（任意线程），回主线程清理状态
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.scrcpyRecordProcess === proc {
+                    self.scrcpyRecordProcess = nil
+                    self.scrcpyStatus = "录屏已结束"
+                }
+            }
+        }
+        if let process {
+            scrcpyRecordProcess = process
+            scrcpyStatus = "正在录屏：\(filename)"
+            append("> scrcpy --record=\(filePath)")
+        } else {
+            scrcpyStatus = "scrcpy 录屏启动失败"
+            append("scrcpy 录屏启动失败")
+        }
+    }
+
+    /// 停止当前 scrcpy 录屏
+    public func stopScrcpyRecord() {
+        guard let process = scrcpyRecordProcess else {
+            scrcpyStatus = "没有正在进行的录屏"
+            return
+        }
+        process.terminate()
+        // terminationHandler 会清理 scrcpyRecordProcess
+        scrcpyStatus = "正在停止录屏..."
     }
 }
