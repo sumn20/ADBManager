@@ -40,7 +40,7 @@ struct ScrcpyCard: View {
             ("关屏投屏",   { model.launchScrcpy(args: ["--turn-screen-off"]) }),
             ("仅视频",    { model.launchScrcpy(args: ["--no-audio"]) }),
             ("仅音频",    { model.launchScrcpy(args: ["--no-video"]) }),
-            ("手柄模式",   { model.launchScrcpy(args: ["-G"]) }),
+            ("窗口置顶",   { model.launchScrcpy(args: ["--always-on-top"]) }),
         ]
         let rows = stride(from: 0, to: items.count, by: 3)
             .map { Array(items[$0..<min($0 + 3, items.count)]) }
